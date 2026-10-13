@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Holding page: keep it out of search results while the real site is offline -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#000000">
+  <title>Torcue · brewing…</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Bricolage Grotesque is torcue.ai's display font; the reference video uses it at weight 300, optical size 24 -->
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --black: #000000;
+      --white: #ffffff;
+      /* Sizes measured from the reference video, as a share of screen width */
+      --logo-width: clamp(120px, 13.94vw, 300px);
+      --text-size: clamp(2.5rem, 4.58vw, 6rem);
+      --logo-text-gap: clamp(16px, 2.6vw, 56px);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body { height: 100%; }
+
+    body {
+      background: var(--black);
+      color: var(--white);
+      font-family: "Bricolage Grotesque", system-ui, sans-serif;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #glass {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    main {
+      position: relative;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: var(--logo-text-gap);
+      /* The video sits the logo and text 1.7% of the height below dead centre */
+      padding: calc(16px + 3.4vh) 16px 16px;
+      text-align: center;
+    }
+
+    .logo {
+      width: var(--logo-width);
+      height: auto;
+    }
+
+    h1 {
+      font-weight: 300;
+      font-variation-settings: "opsz" 24;
+      font-size: var(--text-size);
+      line-height: 1.2;
+    }
+
+    /* Only the word "Brewing" is centred; the dots hang off its right edge */
+    h1 { position: relative; }
+
+    .dots {
+      position: absolute;
+      left: 100%;
+      top: 0;
+    }
+
+    .dot { animation: dot-blink 1.2s infinite both; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes dot-blink {
+      0%, 80%, 100% { opacity: 0.15; }
+      40% { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .dot { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="glass" aria-hidden="true"></canvas>
+
+  <main>
+    <img class="logo" src="torcue-logo-white.svg" alt="Torcue.ai">
+    <h1 aria-label="brewing">brewing<span class="dots" aria-hidden="true"><span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></span></h1>
+  </main>
+
+  <script src="light-motion.js"></script>
+  <script>
+    // Teal light moving behind fluted (ribbed) glass. The light's movement is replayed from the
+    // reference video (light-motion.js); the glass ribs are drawn on top.
+    const MOTION = window.LIGHT_MOTION;
+    const LIGHT_GAIN = 1.2;            // the sampled light already includes the video's rib shading; ours darkens it again
+    const LOOP_BLEND_SECONDS = 1.5;    // the video isn't a loop, so its end fades into its start
+    const RIB_MIN = 0.055;             // rib widths as a share of screen width (video: roughly 6–9%)
+    const RIB_MAX = 0.09;
+    const RIB_MIN_PX = 48;             // keeps ribs from turning into pinstripes on phones
+    const REFRACTION = 1.6;            // each rib shows a slightly magnified slice of the light behind it
+    const LIGHT_SCALE = 0.25;          // light is drawn at quarter resolution, then stretched — it is blurry anyway
+
+    const motionFrames = decodeFrames(MOTION.data, MOTION.columns * MOTION.rows);
+    const videoSeconds = MOTION.frameCount / MOTION.fps;
+    const loopSeconds = videoSeconds - LOOP_BLEND_SECONDS;
+
+    const canvas = document.getElementById("glass");
+    const ctx = canvas.getContext("2d");
+    const grid = document.createElement("canvas");
+    grid.width = MOTION.columns;
+    grid.height = MOTION.rows;
+    const gridCtx = grid.getContext("2d");
+    const gridPixels = gridCtx.createImageData(MOTION.columns, MOTION.rows);
+    const light = document.createElement("canvas");
+    const lightCtx = light.getContext("2d");
+    const shading = document.createElement("canvas");
+    const shadingCtx = shading.getContext("2d");
+
+    let width = 0;
+    let height = 0;
+    let ribs = [];
+
+    function decodeFrames(base64, cellsPerFrame) {
+      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const frames = [];
+      for (let start = 0; start < bytes.length; start += cellsPerFrame) {
+        frames.push(bytes.subarray(start, start + cellsPerFrame));
+      }
+      return frames;
+    }
+
+    // Brightness of one grid cell at a moment in the video, blending neighbouring frames for smooth motion
+    function sampleVideo(seconds, cell) {
+      const position = Math.min(seconds * MOTION.fps, motionFrames.length - 1);
+      const index = Math.floor(position);
+      const next = Math.min(index + 1, motionFrames.length - 1);
+      const mix = position - index;
+      return motionFrames[index][cell] * (1 - mix) + motionFrames[next][cell] * mix;
+    }
+
+    // Loops the video's light: during the first seconds of each loop, the video's ending fades into its start
+    function sampleLoop(seconds, cell) {
+      const t = seconds % loopSeconds;
+      const current = sampleVideo(t, cell);
+      if (t >= LOOP_BLEND_SECONDS) return current;
+      const ending = sampleVideo(t + loopSeconds, cell);
+      const mix = t / LOOP_BLEND_SECONDS;
+      return ending * (1 - mix) + current * mix;
+    }
+
+    // Fixed seed so the rib pattern looks the same on every visit
+    function createRandom(seed) {
+      return () => {
+        seed = (seed * 16807) % 2147483647;
+        return (seed - 1) / 2147483646;
+      };
+    }
+
+    function buildRibs() {
+      const random = createRandom(42);
+      ribs = [];
+      let x = 0;
+      while (x < width) {
+        const ribWidth = Math.max(
+          RIB_MIN_PX * (0.9 + random() * 0.5),
+          width * (RIB_MIN + random() * (RIB_MAX - RIB_MIN))
+        );
+        ribs.push({ x, width: ribWidth });
+        x += ribWidth;
+      }
+    }
+
+    // Per-rib brightness: quick rise to a thin highlight, slow fall into a dark edge, then a hard step
+    function buildShading() {
+      shading.width = canvas.width;
+      shading.height = canvas.height;
+      shadingCtx.fillStyle = "#fff";
+      shadingCtx.fillRect(0, 0, shading.width, shading.height);
+      const ratio = canvas.width / width;
+      for (const rib of ribs) {
+        const x0 = rib.x * ratio;
+        const w = rib.width * ratio;
+        const gradient = shadingCtx.createLinearGradient(x0, 0, x0 + w, 0);
+        gradient.addColorStop(0.00, "rgb(170,170,170)");
+        gradient.addColorStop(0.18, "rgb(255,255,255)");
+        gradient.addColorStop(0.30, "rgb(235,235,235)");
+        gradient.addColorStop(0.85, "rgb(185,185,185)");
+        gradient.addColorStop(1.00, "rgb(150,150,150)");
+        shadingCtx.fillStyle = gradient;
+        shadingCtx.fillRect(Math.floor(x0), 0, Math.ceil(w) + 1, shading.height);
+      }
+    }
+
+    function resize() {
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.round(width * pixelRatio);
+      canvas.height = Math.round(height * pixelRatio);
+      light.width = Math.max(1, Math.round(width * LIGHT_SCALE));
+      light.height = Math.max(1, Math.round(height * LIGHT_SCALE));
+      buildRibs();
+      buildShading();
+    }
+
+    function drawLight(seconds) {
+      const pixels = gridPixels.data;
+      const cellCount = MOTION.columns * MOTION.rows;
+      for (let cell = 0; cell < cellCount; cell++) {
+        const level = Math.min(255, sampleLoop(seconds, cell) * LIGHT_GAIN);
+        // Teal hue sampled from the video: almost no red, blue slightly above green
+        pixels[cell * 4] = level * 0.03;
+        pixels[cell * 4 + 1] = level;
+        pixels[cell * 4 + 2] = Math.min(255, level * 1.1);
+        pixels[cell * 4 + 3] = 255;
+      }
+      gridCtx.putImageData(gridPixels, 0, 0);
+
+      // Fit the video's light to the screen the way background-size: cover would
+      const w = light.width;
+      const h = light.height;
+      const screenAspect = w / h;
+      let drawWidth = w;
+      let drawHeight = h;
+      if (screenAspect > MOTION.sourceAspect) {
+        drawHeight = w / MOTION.sourceAspect;
+      } else {
+        drawWidth = h * MOTION.sourceAspect;
+      }
+      lightCtx.fillStyle = "#000";
+      lightCtx.fillRect(0, 0, w, h);
+      lightCtx.imageSmoothingEnabled = true;
+      lightCtx.imageSmoothingQuality = "high";
+      // Softens the grid into smooth light (ignored by browsers without canvas filters).
+      // Drawn slightly oversized so the blur doesn't pull black in from beyond the edges.
+      const blurRadius = Math.round(Math.max(w, h) * 0.015);
+      const bleed = blurRadius * 2;
+      lightCtx.filter = "blur(" + blurRadius + "px)";
+      lightCtx.drawImage(
+        grid,
+        (w - drawWidth) / 2 - bleed, (h - drawHeight) / 2 - bleed,
+        drawWidth + bleed * 2, drawHeight + bleed * 2
+      );
+      lightCtx.filter = "none";
+    }
+
+    function drawGlass() {
+      const ratio = canvas.width / width;
+      const sourceRatio = light.width / width;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Each rib shows its own magnified slice of the light, which creates the hard edges between ribs
+      for (const rib of ribs) {
+        const sourceWidth = rib.width / REFRACTION;
+        const sourceX = rib.x + (rib.width - sourceWidth) / 2;
+        ctx.drawImage(
+          light,
+          sourceX * sourceRatio, 0, sourceWidth * sourceRatio, light.height,
+          Math.floor(rib.x * ratio), 0, Math.ceil(rib.width * ratio) + 1, canvas.height
+        );
+      }
+
+      ctx.globalCompositeOperation = "multiply";
+      ctx.drawImage(shading, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    function drawAt(seconds) {
+      drawLight(seconds);
+      drawGlass();
+    }
+
+    // #t=<seconds> draws one fixed moment; used to compare frames against the reference video
+    const fixedTime = new URLSearchParams(window.location.hash.slice(1)).get("t");
+    const isStill = fixedTime !== null || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let startTime = null;
+
+    function frame(timestamp) {
+      if (startTime === null) startTime = timestamp;
+      drawAt((timestamp - startTime) / 1000);
+      requestAnimationFrame(frame);
+    }
+
+    // Resizing a canvas wipes it, so a still background has to be redrawn afterwards
+    window.addEventListener("resize", () => {
+      resize();
+      if (isStill) drawAt(Number(fixedTime) || 0);
+    });
+
+    resize();
+    if (isStill) {
+      drawAt(Number(fixedTime) || 0);
+    } else {
+      requestAnimationFrame(frame);
+    }
+  </script>
+</body>
+</html>
